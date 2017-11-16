@@ -9,6 +9,7 @@ import socket
 import struct
 import argparse
 import requests
+import sqliteUtils
 from random import randint
 from ipwhois import IPWhois
 
@@ -25,6 +26,17 @@ def ip2long(ip):
     """
     packed_ip = socket.inet_aton(ip)
     return struct.unpack("!L", packed_ip)[0]
+
+def db_setup(idbfile='.whoisinfo.db'):
+    sqldb = sqliteUtils.sqliteUtils(dbfile)
+    sql = "CREATE TABLE whois (id INTEGER PRIMARY KEY AUTOINCREMENT, cidr TEXT, \
+        name TEXT, handle TEXT, city TEXT, address TEXT, postal_code TEXT, \
+        abuse_emails TEXT, tech_emails TEXT, misc_emails TEXT, created INTEGER, \
+        updated INTEGER)"
+    sqldb.execute_non_query(sql)
+    sql = "CREATE TABLE error_nets (id INTEGER PRIMARY KEY AUTOINCREMENT, net TEXT, \
+        net_end TEXT)"
+    sqldb.execute_non_query(sql)
 
 def get_next_ip(ip_address):
     """
@@ -135,7 +147,11 @@ def break_up_ipv4_address_space(num_threads=8):
 
 def get_netranges(starting_ip='1.0.0.0',
                     last_ip='2.0.0.0',
+                    dbfile='.whoisinfo.db',
                     sleep_min=1, sleep_max=5):
+
+    sqlite = sqliteUtils.sqliteUtils(dbfile)
+
     current_ip = starting_ip
 
     while True:
@@ -167,6 +183,13 @@ def get_netranges(starting_ip='1.0.0.0',
             parts = current_ip.split('.')
             net_end = ".".join([parts[0], parts[1], parts[2], '255'])
             print("Net end: {0}".format(net_end))
+            sql = "SELECT id FROM error_nets WHERE net='{0}' AND \
+                    net_end='{1}'".format(current_ip, net_end)
+            record_id = sqlite.exec_atomic_int_query(sql)
+            if not record_id or 'None' in record_id:
+                sql = "INSERT INTO error_nets (net, net_end) VALUES \
+                        ('{0}','{1}')".format(net, net_end)
+                sqlite.execute_non_query(sql)
 
             current_ip = get_next_ip(net_end)
 
@@ -204,6 +227,21 @@ def get_netranges(starting_ip='1.0.0.0',
         # This is where we would store the data in the db.
         # For now, just print it out and move on.
         print("Net: {0}, Whois Response: \n{1}".format(current_ip, whois_resp))
+        sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(whois_resp['asn_cidr'])
+        record_id = sqlite.exec_atomic_int_query(sql)
+        if not record_id or 'None' in record_id:
+            sql = "INSERT INTO whois (cidr, name, handle, range, description, \
+                    country, state, city, address, postal_code, abuse_emails, \
+                    tech_emails, misc_emails, created, updated) VALUES ('%s', \
+                    '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', \
+                    '%s', '%s', '%s', '%s', '%s')" % (whois_resp['asn_cidr'], \
+                    whois_resp['asn_name'], whois_resp['handle'], whois_resp['range'], \
+                    whois_resp['description'], whois_resp['country'], whois_resp['state'], \
+                    whois_resp['city'], whois_resp['address'], whois_resp['postal_code'], \
+                    whois_resp['abuse_emails'], whois_resp['tech_emails'], \
+                    whois_resp['created'], whois_resp['updated'])
+            sqlite.exec_non_query(sql)
+
         current_ip = get_next_ip(last_netrange_ip)
 
         if current_ip is None:
@@ -235,6 +273,7 @@ def main(argv):
     args = arg_parse.parse_args()
 
     if 'collect' in args.action:
+		db_setup()
         get_netranges('1.0.0.0', '255.255.255.255', args.sleep_min, \
             args.sleep_max)
     elif 'stats' in args.action:
