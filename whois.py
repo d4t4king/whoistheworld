@@ -172,8 +172,9 @@ def get_netranges(starting_ip='1.0.0.0',
 
             if current_ip is None:
                 return # No more undefined ip addresses
-
-            gevent.sleep(randint(sleep_min, sleep_max))
+            # if we error'd out, don't sleep, just go right on to
+            # the next one
+            #gevent.sleep(randint(sleep_min, sleep_max))
             continue
 
         if 'asn_cidr' in whois_resp and \
