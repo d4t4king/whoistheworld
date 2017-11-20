@@ -1,17 +1,26 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import re
 import sys
 import json
 import gevent
 import ipcalc
+import pprint
 import socket
 import struct
 import argparse
 import requests
 import sqliteUtils
+from time import strftime,gmtime
 from random import randint
 from ipwhois import IPWhois
+from ipwhois.exceptions import HTTPLookupError
+from datetime import datetime,timedelta
+
+#######################################
+###    THIS SCRIPT USES SPACES!!!   ###
+#######################################
 
 error_nets = []
 
@@ -27,16 +36,45 @@ def ip2long(ip):
     packed_ip = socket.inet_aton(ip)
     return struct.unpack("!L", packed_ip)[0]
 
-def db_setup(idbfile='.whoisinfo.db'):
+
+def db_setup(dbfile='.whoisinfo.db'):
+    print("Using dbfile {0}.".format(dbfile))
     sqldb = sqliteUtils.sqliteUtils(dbfile)
-    sql = "CREATE TABLE whois (id INTEGER PRIMARY KEY AUTOINCREMENT, cidr TEXT, \
-        name TEXT, handle TEXT, city TEXT, address TEXT, postal_code TEXT, \
-        abuse_emails TEXT, tech_emails TEXT, misc_emails TEXT, created INTEGER, \
-        updated INTEGER)"
-    sqldb.execute_non_query(sql)
-    sql = "CREATE TABLE error_nets (id INTEGER PRIMARY KEY AUTOINCREMENT, net TEXT, \
+    sql = "CREATE TABLE IF NOT EXISTS whois (id INTEGER PRIMARY KEY AUTOINCREMENT, cidr TEXT, \
+        name TEXT, handle TEXT, range TEXT, description TEXT, country TEXT, state TEXT, \
+        city TEXT, address TEXT, postal_code TEXT, abuse_emails TEXT, tech_emails TEXT, \
+        misc_emails TEXT, created INTEGER, updated INTEGER)"
+    sqldb.exec_non_query(sql)
+    sql = "CREATE TABLE IF NOT EXISTS error_nets (id INTEGER PRIMARY KEY AUTOINCREMENT, net TEXT, \
         net_end TEXT)"
-    sqldb.execute_non_query(sql)
+    sqldb.exec_non_query(sql)
+
+
+def date_to_integer(datestr):
+    m = re.search(r'(\d{4})-(\d\d?)-(\d\d?)T(\d\d):(\d\d):(\d\d)(Z|(?:\+|\-)\d\d:\d\d)', datestr)
+    if m:
+        #if m.group(7) == 'Z':
+        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), \
+            int(m.group(4)), int(m.group(5)), int(m.group(6)))
+        #else:
+        #    n = re.search(r'^(\+|\-)\d(\d):(\d\d)$', m.group(7))
+        #    if n:
+        #        # got a timezone offset
+        #        #tz = int("".join([n.group(1), n.group(2), n.group(3)]))
+        #        #print(str(tz))
+        #        tdhours = int("".join([n.group(1), n.group(2)]))
+        #        tdmins = int(n.group(3))
+        #        print("===>>> H: {0} M: {1}".format(tdhours, tdmins))
+        #        tz = timedelta(hours=tdhours, minutes=tdmins)
+        #        print(str(int(tz.total_seconds())))
+        #        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), \
+        #            int(m.group(4)), int(m.group(5)), int(m.group(6)), int(tz.total_seconds()))
+        #    else:
+        #        raise Exception("Didn't match timezone offset! ({0})".format(m.group(7)))
+    else:
+        raise Exception("Didn't match timestamp string! ({0})".format(datestr))
+    return dt
+
 
 def get_next_ip(ip_address):
     """
@@ -150,9 +188,10 @@ def get_netranges(starting_ip='1.0.0.0',
                     dbfile='.whoisinfo.db',
                     sleep_min=1, sleep_max=5):
 
-    sqlite = sqliteUtils.sqliteUtils(dbfile)
-
     current_ip = starting_ip
+
+    # pretty printer
+    pp = pprint.PrettyPrinter(indent=4)
 
     while True:
         # see if we've finished the range of work
@@ -166,8 +205,58 @@ def get_netranges(starting_ip='1.0.0.0',
 
         print current_ip
 
+        whois_resp = ''
         try:
-            whois_resp = IPWhois(current_ip).lookup_rws()
+            #whois_resp = IPWhois(current_ip).lookup_rws()
+            whois_resp = IPWhois(current_ip).lookup_rdap()
+        except HTTPLookupError as error:
+            """
+            The advantage of catching specific errors, is that we
+            can deal with specific problems specfically.
+
+            In other words, if the RDAP look up fails because it
+            can't find the requested IP address (HTTP/404), then
+            try a "regular" whois lookup and see if that works.
+            """
+            print type(error), error
+            #print dir(error)
+
+            if "error code 404" in error.message:
+                try:
+                    whois_resp = IPWhois(current_ip).lookup_whois()
+                except Exception as error:
+                    print type(error), error
+                    #raise error
+
+                    # The smallest IPv4 range that will be assigned by
+                    # a RIR is /24.  So we should lookup the last IP
+                    # for this range and get the next IP after that one.
+                    if not current_ip in error_nets: error_nets.append(current_ip)
+                    parts = current_ip.split('.')
+                    net_end = ".".join([parts[0], parts[1], parts[2], '255'])
+                    # database access object
+                    sqlite = sqliteUtils.sqliteUtils(dbfile)
+                    #print("Net end: {0}".format(net_end))
+                    sql = "SELECT id FROM error_nets WHERE net='{0}' AND \
+                            net_end='{1}'".format(current_ip, net_end)
+                    #print(dir(sqlite))
+                    record_id = sqlite.exec_atomic_int_query(sql)
+                    if not record_id or 'None' in str(record_id):
+                        sql = "INSERT INTO error_nets (net, net_end) VALUES \
+                                ('{0}','{1}')".format(current_ip, net_end)
+                        sqlite.exec_non_query(sql)
+
+                    current_ip = get_next_ip(net_end)
+
+                    if current_ip is None:
+                        return # No more undefined ip addresses
+                    # if we error'd out, don't sleep, just go right on to
+                    # the next one
+                    #gevent.sleep(randint(sleep_min, sleep_max))
+                    continue
+            else:
+                raise error
+
         except Exception as error:
             """
             If a message like 'STDERR: getaddrinfo(whois.apnic.net): Name or
@@ -175,21 +264,24 @@ def get_netranges(starting_ip='1.0.0.0',
             IP address.
             """
             print type(error), error
-            #raise(error)
+
             # The smallest IPv4 range that will be assigned by
             # a RIR is /24.  So we should lookup the last IP
             # for this range and get the next IP after that one.
             if not current_ip in error_nets: error_nets.append(current_ip)
             parts = current_ip.split('.')
             net_end = ".".join([parts[0], parts[1], parts[2], '255'])
-            print("Net end: {0}".format(net_end))
+            # database access object
+            sqlite = sqliteUtils.sqliteUtils(dbfile)
+            #print("Net end: {0}".format(net_end))
             sql = "SELECT id FROM error_nets WHERE net='{0}' AND \
                     net_end='{1}'".format(current_ip, net_end)
+            #print(dir(sqlite))
             record_id = sqlite.exec_atomic_int_query(sql)
-            if not record_id or 'None' in record_id:
+            if not record_id or 'None' in str(record_id):
                 sql = "INSERT INTO error_nets (net, net_end) VALUES \
-                        ('{0}','{1}')".format(net, net_end)
-                sqlite.execute_non_query(sql)
+                        ('{0}','{1}')".format(current_ip, net_end)
+                sqlite.exec_non_query(sql)
 
             current_ip = get_next_ip(net_end)
 
@@ -200,6 +292,8 @@ def get_netranges(starting_ip='1.0.0.0',
             #gevent.sleep(randint(sleep_min, sleep_max))
             continue
 
+        #pp.pprint(whois_resp)
+        #exit(1)
         if 'asn_cidr' in whois_resp and \
             whois_resp['asn_cidr'] is not None and \
             whois_resp['asn_cidr'].count('.') == 3:
@@ -207,14 +301,15 @@ def get_netranges(starting_ip='1.0.0.0',
         else:
             try:
                 last_netrange_ip = \
-                    whois_resp['nets'][0]['range'].split('-')[-1].strip()
+                    whois_resp['network']['end_address'].strip()
+                    #netrange.split('-')[-1].strip()
                 assert last_netrange_ip.count('.') == 3
             except:
                 # no match found for n + 192.0.1.0.
                 print("Missing ASN CIDR in whois response: {0}".format(whois_resp))
                 current_ip = get_next_ip(current_ip)
 
-                if current_ip in None:
+                if current_ip is None:
                     return # no more undefined ip addresses
 
                 gevent.sleep(randint(sleep_min, sleep_max))
@@ -226,20 +321,125 @@ def get_netranges(starting_ip='1.0.0.0',
 
         # This is where we would store the data in the db.
         # For now, just print it out and move on.
-        print("Net: {0}, Whois Response: \n{1}".format(current_ip, whois_resp))
-        sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(whois_resp['asn_cidr'])
+        #print("Net: {0}, Whois Response: \n{1}".format(current_ip, whois_resp))
+        sqlite = sqliteUtils.sqliteUtils(dbfile)
+        sql = ''
+
+        match = re.search(r'^[0-9.]+$', whois_resp['asn_cidr'])
+        if match:
+            sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(
+                whois_resp['asn_cidr'])
+        elif 'nets' in whois_resp.keys() and \
+            re.search(r'^[0-9.]+$', whois_resp['nets'][0]['cidr']) is not None:
+            sql = "SELECT id FROM whois WHERE cidr LIKE '{0}'".format(
+                whois_resp['nets'][0]['cidr'])
+        else:
+            sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(
+                whois_resp['network']['cidr'])
         record_id = sqlite.exec_atomic_int_query(sql)
-        if not record_id or 'None' in record_id:
-            sql = "INSERT INTO whois (cidr, name, handle, range, description, \
-                    country, state, city, address, postal_code, abuse_emails, \
-                    tech_emails, misc_emails, created, updated) VALUES ('%s', \
-                    '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', \
-                    '%s', '%s', '%s', '%s', '%s')" % (whois_resp['asn_cidr'], \
-                    whois_resp['asn_name'], whois_resp['handle'], whois_resp['range'], \
-                    whois_resp['description'], whois_resp['country'], whois_resp['state'], \
-                    whois_resp['city'], whois_resp['address'], whois_resp['postal_code'], \
-                    whois_resp['abuse_emails'], whois_resp['tech_emails'], \
-                    whois_resp['created'], whois_resp['updated'])
+        created = 0
+        updated = 0
+        #pp.pprint(whois_resp['network'])
+        if whois_resp['network']['events']:
+            for evt in whois_resp['network']['events']:
+                if 'last changed' in evt['action'] and \
+                    not 'None' in evt['timestamp']:
+                    updated = date_to_integer(evt['timestamp'])
+                if 'registration' in evt['action'] and \
+                    not 'None' in evt['timestamp']:
+                    created = date_to_integer(evt['timestamp'])
+        elif whois_resp['nets'][0]['updated'] and \
+            whois_resp['nets'][0]['created']:
+            if whois_resp['nets'][0]['updated'] is not None:
+                updated = date_to_integer(whois_resp['nets'][0]['updated'])
+            else:
+                updated = 'None'
+            if whois_resp['nets'][0]['created'] is not None:
+                created = date_to_integer(whois_resp['nets'][0]['created'])
+            else:
+                created = 'None'
+        description = ''
+        #pp.pprint(whois_resp['network'])
+        if whois_resp['network']['remarks']:
+            if whois_resp['network']['remarks'][0]['description'] and \
+                not 'None' in whois_resp['network']['remarks'][0]['description']:
+                description = whois_resp['network']['remarks'][0]['description'].replace('\n', ' ')
+        elif 'nets' in whois_resp.keys():
+            if whois_resp['nets'][0]['description'] and \
+                not 'None' in whois_resp['nets'][0]['description']:
+                description = whois_resp['nets'][0]['description'].replace('\n', ' ')
+        description = description.replace("'", "''")
+        address = ''
+        if whois_resp['objects']:
+            for key in whois_resp['objects'].keys():
+                #print(str(type(whois_resp['objects'])))
+                if not 'None' in whois_resp['objects'][key]['contact']['address'][0]['value']:
+                    address = whois_resp['objects'][key]['contact']['address'][0]['value'].replace('\n', ' ')
+                    # just get the infor for the first object
+                    break
+        elif 'nets' in whois_resp.keys():
+            if whois_resp['nets'][0]['address'] and \
+                not 'None' in whois_resp['nets'][0]['address']:
+                address = whois_resp['nets'][0]['address'].replace('\n', ' ')
+        address = address.replace("'", "''")
+        netrange = ''
+        if whois_resp['network']['start_address'] and \
+            whois_resp['network']['start_address'].count(',') == 3 and \
+            whois_resp['network']['end_address'] and \
+            whois_resp['network']['end_address'].count('.') == 3:
+            netrange = "{0} - {1}".format(
+                whois_resp['network']['start_address'],
+                whois_resp['network']['end_address'])
+        elif 'nets' in whois_resp.keys() and \
+            whois_resp['nets'][0]['range'] is not None:
+            netrange = whois_resp['nets'][0]['range']
+
+        if not record_id or 'None' in str(record_id):
+            if whois_resp['network']:
+                m = re.search(r'^[0-9.]+$', whois_resp['asn_cidr'])
+                # If asn_cidr looks like an ip, use that.  Otherwise
+                # use the net cidr.
+                if m:
+                    sql = "INSERT INTO whois (cidr, name, handle, range, description, \
+                        country, address, created, updated) VALUES ('%s', \
+                        '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                        (whois_resp['asn_cidr'], \
+                        whois_resp['network']['name'], whois_resp['network']['handle'], \
+                        netrange, description, \
+                        whois_resp['network']['country'], \
+                        address, created, updated)
+                else:
+                    sql = "INSERT INTO whois (cidr, name, handle, range, description, \
+                        country, address, created, updated) VALUES ('%s', \
+                        '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                        (whois_resp['network']['cidr'], \
+                        whois_resp['network']['name'], whois_resp['network']['handle'], \
+                        netrange, description, \
+                        whois_resp['network']['country'], \
+                        address, created, updated)
+            elif whois_resp['nets']:
+                m = re.search(r'^[0-9.]+$', whois_resp['asn_cidr'])
+                # If asn_cidr looks like an ip, use that.  Otherwise
+                # use the net cidr.
+                if m:
+                    sql = "INSERT INTO whois (cidr, name, handle, range, description, \
+                        country, address, created, updated) VALUES ('%s', \
+                        '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                        (whois_resp['asn_cidr'], \
+                        whois_resp['nets'][0]['name'], whois_resp['nets'][0]['handle'], \
+                        netrange, description, \
+                        whois_resp['nets'][0]['country'], \
+                        address, created, updated)
+                else:
+                    sql = "INSERT INTO whois (cidr, name, handle, range, description, \
+                        country, address, created, updated) VALUES ('%s', \
+                        '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                        (whois_resp['nets'][0]['cidr'], \
+                        whois_resp['nets'][0]['name'], whois_resp['nets'][0]['handle'], \
+                        netrange, description, \
+                        whois_resp['nets'][0]['country'], \
+                        address, created, updated)
+            #print(sql)
             sqlite.exec_non_query(sql)
 
         current_ip = get_next_ip(last_netrange_ip)
@@ -267,15 +467,28 @@ def main(argv):
     arg_parse.add_argument('--sleep-max', type=int, dest='sleep_max', \
         default=5, help="Maximum thread sleep value in seconds.  \
         Default is 5.")
-    arg_parse.add_argument('-t', '--threads', type=int, dest='threads', \
+    arg_parse.add_argument('-t', '--threads', type=int, dest='num_threads', \
         default=8, help='Number of threads to use.  A good number seems \
         to be 4 threads per processor')
+    arg_parse.add_argument('-d', '--dbfile', dest='dbfile', default='.whoisinfo.db', \
+        type=str, help='The database file to use for sqlite.')
     args = arg_parse.parse_args()
 
     if 'collect' in args.action:
-		db_setup()
-        get_netranges('1.0.0.0', '255.255.255.255', args.sleep_min, \
-            args.sleep_max)
+        db_setup(args.dbfile)
+
+        threads = [gevent.spawn(get_netranges, starting_ip, ending_ip,
+                    args.dbfile, args.sleep_min, args.sleep_max)
+                    for starting_ip, ending_ip in
+                        break_up_ipv4_address_space(args.num_threads)]
+
+        gevent.joinall(threads)
+
+        # single-thread mode for debugging
+        #get_netranges('1.0.0.0', '255.255.255.255',
+        #                args.dbfile, args.sleep_min,
+        #                args.sleep_max)
+
     elif 'stats' in args.action:
         raise NotImplementedError("TODO!")
     else:
