@@ -121,6 +121,7 @@ class NormalizedWhois(object):
         if 'network' in response.keys():
             self.isrdapresponse = True
             self.iswhoisresponse = False
+            self.asn = response['asn']
             if not 'asn_cidr' in response.keys():
                 self.asn_cidr = response['network']['cidr']
             else:
@@ -195,13 +196,17 @@ class NormalizedWhois(object):
             self.end_address = response['network']['end_address']
             self.name = response['network']['name']
             self.handle = response['network']['handle']
-            self.country = response['network']['country']
+            if response['network']['country'] is not None:
+                self.country = response['network']['country'].upper()
+            else:
+                self.country = response['network']['country']
             self.city = 'None'
             self.state = 'None'
             self.postal_code = 'None'
         elif 'nets' in response.keys():
             self.iswhoisresponse = True
             self.isrdapresponse = False
+            self.asn = response['asn']
             if not 'asn_cidr' in response.keys():
                 self.asn_cidr = response['nets'][0]['cidr']
             else:
@@ -310,15 +315,18 @@ class NormalizedWhois(object):
                     raise(error)
             self.name = response['nets'][0]['name']
             self.handle = response['nets'][0]['handle']
-            self.country = response['nets'][0]['country']
+            if response['nets'][0]['country'] is not None:
+                self.country = response['nets'][0]['country'].upper()
+            else:
+                self.country = response['nets'][0]['country']
             self.city = response['nets'][0]['city']
             self.state = response['nets'][0]['state']
             self.postal_code = response['nets'][0]['postal_code']
 
     def __repr__(self):
-        print self.ascii_raw()
-        print self.raw
-        print "=" * 72
+        #print self.ascii_raw()
+        #print self.raw
+        #print "=" * 72
         strObj = """
 asn_cidr: %s, cidr: %s, range: %s, name: %s, handle: %s,
 isrdapresponse: %s, iswhoisresponse: %s, start_address: %s,
@@ -521,7 +529,7 @@ def get_netranges(starting_ip='1.0.0.0',
         if current_ip == None:  # no more undefined addresses
             return
 
-        print current_ip
+        #print current_ip
 
         whois_resp = ''
         try:
@@ -625,9 +633,9 @@ def get_netranges(starting_ip='1.0.0.0',
                 assert last_netrange_ip.count('.') == 3
             except:
                 # no match found for n + 192.0.1.0.
-                print("Missing ASN CIDR in whois response: {0}".format(norm_resp))
-                print(norm_resp.ascii_dict())
-                pp.pprint(norm_resp.__dict__)
+                print("Missing ASN CIDR in whois response: {0}".format(norm_resp.raw))
+                #print(norm_resp.ascii_dict())
+                #pp.pprint(norm_resp.__dict__)
                 # The smallest IPv4 range that will be assigned by
                 # a RIR is /24.  So we should lookup the last IP
                 # for this range and get the next IP after that one.
@@ -666,12 +674,17 @@ def get_netranges(starting_ip='1.0.0.0',
         #print("Net: {0}, Whois Response: \n{1}".format(current_ip, whois_resp))
         sqlite = sqliteUtils.sqliteUtils(dbfile)
         sql = ''
+        record_Id = 0
 
-        match = re.search(r'^[0-9.]+$', norm_resp.asn_cidr)
-        if match:
-            sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(
-                norm_resp.asn_cidr
-            )
+        if norm_resp.asn_cidr is not None:
+            match = re.search(r'^[0-9.]+$', norm_resp.asn_cidr)
+            if match:
+                sql = "SELECT id FROM whois WHERE asn_cidr LIKE '{0}%'".format(
+                    norm_resp.asn_cidr
+                )
+            else:
+                sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(
+                    norm_resp.cidr)
         else:
             sql = "SELECT id FROM whois WHERE cidr LIKE '{0}%'".format(
                 norm_resp.cidr)
@@ -679,20 +692,22 @@ def get_netranges(starting_ip='1.0.0.0',
 
         if not record_id or 'None' in str(record_id):
             if norm_resp.isrdapresponse:
-                sql = "INSERT INTO whois (asn, cidr, name, handle, range, \
-                    description, \
+                sql = "INSERT INTO whois (asn, asn_cidr, cidr, name, \
+                    handle, range, description, \
                     country, address, created, updated) VALUES ('%s', '%s', \
-                    '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
-                    (norm_resp.asn, norm_resp.asn_cidr, norm_resp.name, norm_resp.handle, \
+                    '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                    (norm_resp.asn, norm_resp.asn_cidr, norm_resp.cidr, \
+                    norm_resp.name, norm_resp.handle, \
                     norm_resp.range, norm_resp.description, norm_resp.country, \
                     norm_resp.address, norm_resp.created, norm_resp.updated)
             else:
-                sql = "INSERT INTO whois (asn, cidr, name, handle, range, \
-                    description, \
+                sql = "INSERT INTO whois (asn, asn_cidr, cidr, name, \
+                    handle, range, description, \
                     country, state, city, postal_code, address, created, \
-                    updated) VALUES ('%s', '%s', '%s', '%s', '%s', '%s', '%s', \
-                    '%s', '%s', '%s', '%s', '%s', '%s')" % \
-                    (norm_resp.asn, norm_resp.asn_cidr, norm_resp.name, norm_resp.handle, \
+                    updated) VALUES ('%s', '%s', '%s', '%s', '%s', '%s', \
+                    '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % \
+                    (norm_resp.asn, norm_resp.asn_cidr, norm_resp.cidr, \
+                    norm_resp.name, norm_resp.handle, \
                     norm_resp.range, norm_resp.description, norm_resp.country, \
                     norm_resp.state, norm_resp.city, norm_resp.postal_code, \
                     norm_resp.address, norm_resp.created, norm_resp.updated)
