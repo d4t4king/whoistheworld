@@ -292,7 +292,9 @@ class NormalizedWhois(object):
                             self.end_address = "{0}.{1}.{2}.255".format(
                                 parts[0], parts[1], parts[2]
                             )
-                        elif  int(mask) == 22:
+                        elif int(mask) == 22 or \
+                            int(mask) == 19 or \
+                            int(mask) == 18:
                             finip = "{0}.{1}.{2}.0".format(
                                 parts[0], parts[1], parts[2]
                             )
@@ -358,6 +360,7 @@ def ip2long(ip):
     :return ipv4 address
     :rtype integer
     """
+    print("Got IP in ip2log: {0}".format(ip))
     packed_ip = socket.inet_aton(ip)
     return struct.unpack("!L", packed_ip)[0]
 
