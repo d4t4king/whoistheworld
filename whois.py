@@ -9,6 +9,7 @@ import ipcalc
 import pprint
 import socket
 import struct
+import logging
 import argparse
 import requests
 import sqliteUtils
@@ -360,48 +361,49 @@ def ip2long(ip):
     :return ipv4 address
     :rtype integer
     """
-    print("Got IP in ip2log: {0}".format(ip))
-    packed_ip = socket.inet_aton(ip)
+    logger = logging.getLogger(__name__)
+    #print("Got IP in ip2log: {0}".format(ip))
+    try:
+        packed_ip = socket.inet_aton(ip)
+    except Exception as err:
+        if "illegal IP address string passed to inet_aton" in \
+            err.message:
+            logger.error("Illegal IP address string passed to inet_aton: {0}".format(ip))
+            print "Illegal IP address string passed to inet_aton: {0}".format(ip)
+        raise err
     return struct.unpack("!L", packed_ip)[0]
 
 
 def db_setup(dbfile='.whoisinfo.db'):
+    logger = logging.getLogger(__name__)
+    logger.debug("Entered db_setup().")
     print("Using dbfile {0}.".format(dbfile))
+    logger.debug("Using dbfile {0}.".format(dbfile))
     sqldb = sqliteUtils.sqliteUtils(dbfile)
+    logger.info("db_setup: SQLite Utils object initialized successfully.")
     sql = "CREATE TABLE IF NOT EXISTS whois (id INTEGER PRIMARY KEY AUTOINCREMENT, \
         asn INTEGER, asn_cidr TEXT, cidr TEXT, start_address TEXT, end_address TEXT, \
         name TEXT, handle TEXT, range TEXT, description TEXT, country TEXT, state TEXT, \
         city TEXT, address TEXT, postal_code TEXT, abuse_emails TEXT, tech_emails TEXT, \
         misc_emails TEXT, created INTEGER, updated INTEGER)"
+    logger.debug("SQL statement prepared: {0}".format(sql))
     sqldb.exec_non_query(sql)
     sql = "CREATE TABLE IF NOT EXISTS error_nets (id INTEGER PRIMARY KEY AUTOINCREMENT, \
         net TEXT, net_end TEXT, http_error INTEGER, http_error_code INTEGER)"
+    logger.debug("SQL statement prepared: {0}".format(sql))
     sqldb.exec_non_query(sql)
 
 
 def date_to_integer(datestr):
+    logger = logging.getLogger(__name__)
+    logger.debug("In fate_to_integer()....")
     m = re.search(r'(\d{4})-(\d\d?)-(\d\d?)T(\d\d):(\d\d):(\d\d)(Z|(?:\+|\-)\d\d:\d\d)', datestr)
     if m:
-        #if m.group(7) == 'Z':
         dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), \
             int(m.group(4)), int(m.group(5)), int(m.group(6)))
-        #else:
-        #    n = re.search(r'^(\+|\-)\d(\d):(\d\d)$', m.group(7))
-        #    if n:
-        #        # got a timezone offset
-        #        #tz = int("".join([n.group(1), n.group(2), n.group(3)]))
-        #        #print(str(tz))
-        #        tdhours = int("".join([n.group(1), n.group(2)]))
-        #        tdmins = int(n.group(3))
-        #        print("===>>> H: {0} M: {1}".format(tdhours, tdmins))
-        #        tz = timedelta(hours=tdhours, minutes=tdmins)
-        #        print(str(int(tz.total_seconds())))
-        #        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), \
-        #            int(m.group(4)), int(m.group(5)), int(m.group(6)), int(tz.total_seconds()))
-        #    else:
-        #        raise Exception("Didn't match timezone offset! ({0})".format(m.group(7)))
     else:
         raise Exception("Didn't match timestamp string! ({0})".format(datestr))
+        logger.error("Didn't match timestamp string! ({0})".format(datestr))
     return dt
 
 
@@ -419,6 +421,7 @@ def get_next_ip(ip_address):
     >>> get_next_ip('255.255.255.255') is None
     True
     """
+    logger = logging.getLogger(__name__)
     assert ip_address.count('.') == 3, \
         'Must be an IPv4 address in str representation'
 
@@ -429,6 +432,7 @@ def get_next_ip(ip_address):
         return socket.inet_ntoa(struct.pack('!L', ip2long(ip_address) + 1))
     except Exception, error:
         print 'Unable to get next IP for %s' % ip_address
+        logger.error("Unable to get next IP for %s." % ip_address)
         raise error
 
 def get_netrange_end(asn_cidr):
@@ -442,6 +446,7 @@ def get_netrange_end(asn_cidr):
             ip2long(str(ipcalc.Network(asn_cidr).host_first())) + \
             ipcalc.Network(asn_cidr).size() - 2
     except ValueError, error:
+        logger.error('Issue calculating size of %s network.' % asn_cidr)
         print 'Issue calculating size of %s network' % asn_cidr
         raise error
 
@@ -500,6 +505,8 @@ def break_up_ipv4_address_space(num_threads=8):
      ('192.0.0.0', '223.255.255.255'), ('224.0.0.0', '255.255.255.255')]
     True
     """
+    logger = logging.getLogger(__name__)
+    logger.info("Splitting net ranges among {0} threads.".format(num_threads))
     ranges = []
 
     multiplier = 256 / num_threads
@@ -517,6 +524,9 @@ def get_netranges(starting_ip='1.0.0.0',
                     dbfile='.whoisinfo.db',
                     sleep_min=1, sleep_max=5):
 
+    logger = logging.getLogger(__name__)
+    logger.debug("In get_netranges()...")
+
     current_ip = starting_ip
 
     # pretty printer
@@ -530,6 +540,7 @@ def get_netranges(starting_ip='1.0.0.0',
         current_ip = get_next_undefined_address(current_ip)
 
         if current_ip == None:  # no more undefined addresses
+            logger.info("No more undefined IPs to process.")
             return
 
         #print current_ip
@@ -549,7 +560,7 @@ def get_netranges(starting_ip='1.0.0.0',
             """
             #print type(error), error
             #print dir(error)
-
+            logger.warn('Got HTTPLookupError: {0}'.format(error))
             if "error code 404" in error.message or \
                 "error code 400" in error.message:
                 try:
@@ -557,6 +568,7 @@ def get_netranges(starting_ip='1.0.0.0',
                 except Exception as error:
                     print type(error), error
                     #raise error
+                    logger.warn('Got error from lookup_whois(): {0}'.format(error))
 
                     # The smallest IPv4 range that will be assigned by
                     # a RIR is /24.  So we should lookup the last IP
@@ -579,12 +591,14 @@ def get_netranges(starting_ip='1.0.0.0',
                     current_ip = get_next_ip(net_end)
 
                     if current_ip is None:
+                        logger.info("No more undefined IPs to process.")
                         return # No more undefined ip addresses
                     # if we error'd out, don't sleep, just go right on to
                     # the next one
                     #gevent.sleep(randint(sleep_min, sleep_max))
                     continue
             else:
+                logger.error(error, exc_info=True)
                 pp.pprint(error)
                 print("Error Message: {0}".format(error.message))
                 raise error
@@ -596,6 +610,7 @@ def get_netranges(starting_ip='1.0.0.0',
             IP address.
             """
             print type(error), error
+            logger.error(error, exc_info=True)
 
             # The smallest IPv4 range that will be assigned by
             # a RIR is /24.  So we should lookup the last IP
@@ -605,12 +620,14 @@ def get_netranges(starting_ip='1.0.0.0',
             net_end = ".".join([parts[0], parts[1], parts[2], '255'])
             # database access object
             sqlite = sqliteUtils.sqliteUtils(dbfile)
+            logger.info("SQLite Utils object instantiated successfully.")
             #print("Net end: {0}".format(net_end))
             sql = "SELECT id FROM error_nets WHERE net='{0}' AND \
                     net_end='{1}'".format(current_ip, net_end)
             #print(dir(sqlite))
             record_id = sqlite.exec_atomic_int_query(sql)
             if not record_id or 'None' in str(record_id):
+                logger.info("No record id for {0} in error_nets.  Inserting new record.".format(current_ip))
                 sql = "INSERT INTO error_nets (net, net_end) VALUES \
                         ('{0}','{1}')".format(current_ip, net_end)
                 sqlite.exec_non_query(sql)
@@ -618,6 +635,7 @@ def get_netranges(starting_ip='1.0.0.0',
             current_ip = get_next_ip(net_end)
 
             if current_ip is None:
+                logger.info("No more undefined IPs to process.")
                 return # No more undefined ip addresses
             # if we error'd out, don't sleep, just go right on to
             # the next one
@@ -633,12 +651,13 @@ def get_netranges(starting_ip='1.0.0.0',
         else:
             try:
                 last_netrange_ip = norm_resp.end_address
-                assert last_netrange_ip.count('.') == 3
+                assert last_netrange_ip.count('.') == 3, \
+                    "Unable to set last_netrange_ip."
             except:
                 # no match found for n + 192.0.1.0.
-                print("Missing ASN CIDR in whois response: {0}".format(norm_resp.raw))
-                #print(norm_resp.ascii_dict())
-                #pp.pprint(norm_resp.__dict__)
+                print("Unable to set end address for next range: {0}".format(norm_resp.raw))
+                logger.warn("Unable to set end address for next range: {0}".format(norm_resp.raw))
+
                 # The smallest IPv4 range that will be assigned by
                 # a RIR is /24.  So we should lookup the last IP
                 # for this range and get the next IP after that one.
@@ -661,6 +680,7 @@ def get_netranges(starting_ip='1.0.0.0',
                 current_ip = get_next_ip(net_end)
 
                 if current_ip is None:
+                    logger.info("No more undefined IPs to process.")
                     return # No more undefined ip addresses
                 # if we error'd out, don't sleep, just go right on to
                 # the next one
@@ -720,6 +740,7 @@ def get_netranges(starting_ip='1.0.0.0',
         current_ip = get_next_ip(last_netrange_ip)
 
         if current_ip is None:
+            logger.info("No more undefined IPs to process.")
             return # no more undefined ip addresses
 
         gevent.sleep(randint(sleep_min, sleep_max))
@@ -733,6 +754,24 @@ def main(argv):
         arguments a different way, but we'll leave it
         for now.)
     """
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    # create a file handler
+    handler = logging.FileHandler('whois.log')
+    handler.setLevel(logging.INFO)
+
+    # create a logging format
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+
+    # add the handlers to the logger
+    logger.addHandler(handler)
+
+    logger.info('Program started.  Logging initialized.')
+
+    logger.info('Parsing command line arguments.')
     arg_parse = argparse.ArgumentParser(sys.argv[0])
     arg_parse.add_argument('action', type=str, nargs=1, metavar='action', \
         help="Action to take.  Valid options are 'collect' or 'stats'")
@@ -750,14 +789,19 @@ def main(argv):
     args = arg_parse.parse_args()
 
     if 'collect' in args.action:
+        logger.info('Starting \'collect\' activity.')
+        logger.info('Setting up database.')
         db_setup(args.dbfile)
+        logger.info('database setup complete.')
 
         threads = [gevent.spawn(get_netranges, starting_ip, ending_ip,
                     args.dbfile, args.sleep_min, args.sleep_max)
                     for starting_ip, ending_ip in
                         break_up_ipv4_address_space(args.num_threads)]
 
+        logger.info('Waiting for threads to join.')
         gevent.joinall(threads)
+        logger.info('All threads joined.')
 
         # single-thread mode for debugging
         # get_netranges('0.0.0.0', '255.255.255.255',
@@ -767,6 +811,7 @@ def main(argv):
     elif 'stats' in args.action:
         raise NotImplementedError("TODO!")
     else:
+        logger.error('Unrecognized action! ({0})'.format(args.action))
         raise Exception("Unrecognized action! ({0})".format(args.action))
 
 if __name__ == '__main__':
